@@ -1,3 +1,5 @@
+import os
+
 import streamlit as st
 import pymysql
 import pandas as pd
@@ -7,27 +9,41 @@ import plotly.graph_objects as go
 st.set_page_config(page_title="Monitor de Precios", layout="wide")
 
 # --- GESTIÓN DE SECRETOS Y CONEXIÓN ---
-def get_db_connection():
-    # Intenta obtener la contraseña de los secretos de Streamlit (Nube)
-    # Si no existe (estás en local), usa la contraseña directa (PELIGROSO PARA GITHUB)
+def get_db_config():
+    """Load database settings without embedding credentials in source code."""
     try:
-        db_password = st.secrets["db_password"]
-    except FileNotFoundError:
-        # Fallback para pruebas locales rápidas (No recomendado subir esto a GitHub)
-        db_password = "Estadistica2024!!" 
+        mysql = st.secrets["mysql"]
+        return {
+            "host": mysql["host"],
+            "user": mysql["user"],
+            "password": mysql["password"],
+            "database": mysql["database"],
+            "port": int(mysql.get("port", 3306)),
+        }
+    except Exception:
+        env_config = {
+            "host": os.getenv("MONITOR_DB_HOST"),
+            "user": os.getenv("MONITOR_DB_USER"),
+            "password": os.getenv("MONITOR_DB_PASSWORD"),
+            "database": os.getenv("MONITOR_DB_NAME"),
+            "port": int(os.getenv("MONITOR_DB_PORT", "3306")),
+        }
+        missing = [key for key in ("host", "user", "password", "database") if not env_config[key]]
+        if missing:
+            raise RuntimeError(
+                "Database configuration is missing. Add the [mysql] settings "
+                "to .streamlit/secrets.toml or define the MONITOR_DB_* environment variables."
+            )
+        return env_config
 
-    config_semanal = {
-        'host': '54.94.131.196',
-        'user': 'estadistica',
-        'password': db_password,
-        'database': 'canasta_basica_supermercados'
-    }
-    return pymysql.connect(**config_semanal)
+
+def get_db_connection():
+    return pymysql.connect(**get_db_config())
 
 # --- CACHÉ DE DATOS ---
 @st.cache_data(ttl=3600)
 def cargar_datos(fecha_inicio, fecha_fin):
-    query = f"""
+    query = """
     SELECT 
         p.id_link_producto, p.precio_normal, p.fecha_extraccion,
         s.nombre AS nombre_supermercado, c.nombre AS nombre_categoria
@@ -35,17 +51,19 @@ def cargar_datos(fecha_inicio, fecha_fin):
     INNER JOIN link_productos l ON p.id_link_producto = l.id_link_producto
     INNER JOIN supermercados s ON l.id_supermercado = s.id_super
     INNER JOIN categorias c ON l.id_categoria = c.id_categoria
-    WHERE p.fecha_extraccion BETWEEN '{fecha_inicio}' AND '{fecha_fin}'
+    WHERE p.fecha_extraccion BETWEEN %s AND %s
       AND p.id_extraccion NOT IN (1, 4, 5, 6);
     """
+    conn = None
     try:
         conn = get_db_connection()
-        df = pd.read_sql(query, conn)
-        conn.close()
-        return df
-    except Exception as e:
-        st.error(f"Error de conexión: {e}")
+        return pd.read_sql(query, conn, params=(fecha_inicio, fecha_fin))
+    except Exception:
+        st.error("No se pudieron cargar los datos. Revisa la configuración y disponibilidad de la base.")
         return pd.DataFrame()
+    finally:
+        if conn is not None:
+            conn.close()
 
 # --- INTERFAZ PRINCIPAL ---
 st.title("📊 Dinámica de Precios Semanal")
